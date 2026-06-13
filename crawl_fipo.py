@@ -134,51 +134,59 @@ def crawl_with_requests() -> pd.DataFrame | None:
 
 
 # ---------------------------------------------------------------------------
-# 방법 2: Selenium (JavaScript 렌더링이 필요한 경우)
+# 방법 2: Playwright (JavaScript 렌더링이 필요한 경우)
 # ---------------------------------------------------------------------------
 
-def crawl_with_selenium() -> pd.DataFrame | None:
-    """Selenium을 이용한 크롤링 (동적 JS 렌더링 대응)."""
+PLAYWRIGHT_CHROMIUM = "/opt/pw-browsers/chromium-1194/chrome-linux/chrome"
+
+
+def crawl_with_playwright() -> pd.DataFrame | None:
+    """Playwright를 이용한 크롤링 (동적 JS 렌더링 대응)."""
+    import os
     try:
-        from selenium import webdriver
-        from selenium.webdriver.chrome.options import Options
-        from selenium.webdriver.chrome.service import Service
-        from selenium.webdriver.common.by import By
-        from selenium.webdriver.support import expected_conditions as EC
-        from selenium.webdriver.support.ui import WebDriverWait
-        from webdriver_manager.chrome import ChromeDriverManager
+        from playwright.sync_api import sync_playwright
     except ImportError:
-        print("[ERROR] selenium 또는 webdriver-manager가 설치되지 않았습니다.")
-        print("  pip install selenium webdriver-manager")
+        print("[ERROR] playwright가 설치되지 않았습니다.")
+        print("  pip install playwright")
         return None
 
-    print(f"[INFO] Selenium으로 {BASE_URL} 접속 중...")
-    options = Options()
-    options.add_argument("--headless")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument(f"user-agent={HEADERS['User-Agent']}")
-
-    driver = None
+    print(f"[INFO] Playwright로 {BASE_URL} 접속 중...")
     try:
-        service = Service(ChromeDriverManager().install())
-        driver = webdriver.Chrome(service=service, options=options)
-        driver.get(BASE_URL)
+        with sync_playwright() as p:
+            launch_kwargs: dict = {
+                "headless": True,
+                "args": ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
+            }
+            if os.path.isfile(PLAYWRIGHT_CHROMIUM):
+                launch_kwargs["executable_path"] = PLAYWRIGHT_CHROMIUM
 
-        # 테이블 로딩 대기 (최대 15초)
-        wait = WebDriverWait(driver, 15)
-        wait.until(EC.presence_of_element_located((By.TAG_NAME, "table")))
-        time.sleep(2)  # 추가 렌더링 대기
+            browser = p.chromium.launch(**launch_kwargs)
+            context = browser.new_context(
+                user_agent=HEADERS["User-Agent"],
+                extra_http_headers={"Accept-Language": "ja,en;q=0.9"},
+                ignore_https_errors=True,
+            )
+            page = context.new_page()
+            page.goto(BASE_URL, wait_until="networkidle", timeout=30000)
 
-        soup = BeautifulSoup(driver.page_source, "html.parser")
+            # 테이블 렌더링 대기
+            try:
+                page.wait_for_selector("table", timeout=15000)
+            except Exception:
+                pass
+            time.sleep(2)
+
+            html = page.content()
+            browser.close()
+
+        soup = BeautifulSoup(html, "html.parser")
         records = _parse_table(soup)
 
         if not records:
-            print("[WARN] Selenium으로도 데이터를 추출하지 못했습니다.")
-            # 페이지 소스를 파일로 저장해 구조 확인
+            print("[WARN] Playwright로도 데이터를 추출하지 못했습니다.")
             with open("page_source.html", "w", encoding="utf-8") as f:
-                f.write(driver.page_source)
-            print("[INFO] page_source.html 파일에 페이지 소스를 저장했습니다.")
+                f.write(html)
+            print("[INFO] page_source.html 에 페이지 소스를 저장했습니다. 구조를 확인하세요.")
             return None
 
         df = pd.DataFrame(records)
@@ -186,11 +194,8 @@ def crawl_with_selenium() -> pd.DataFrame | None:
         return df
 
     except Exception as e:
-        print(f"[ERROR] Selenium 크롤링 실패: {e}")
+        print(f"[ERROR] Playwright 크롤링 실패: {e}")
         return None
-    finally:
-        if driver:
-            driver.quit()
 
 
 # ---------------------------------------------------------------------------
@@ -201,10 +206,10 @@ def main():
     # 1차: requests 시도
     df = crawl_with_requests()
 
-    # 2차: Selenium 폴백
+    # 2차: Playwright 폴백
     if df is None or df.empty:
-        print("[INFO] Selenium으로 재시도합니다...")
-        df = crawl_with_selenium()
+        print("[INFO] Playwright로 재시도합니다...")
+        df = crawl_with_playwright()
 
     if df is None or df.empty:
         print("[ERROR] 크롤링 실패: 데이터를 가져오지 못했습니다.")
